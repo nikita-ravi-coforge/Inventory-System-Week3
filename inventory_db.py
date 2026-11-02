@@ -1,4 +1,4 @@
-"""SQLite connection, schema, sample catalog, products, and search."""
+"""SQLite connection, schema, sample catalog, products, search, and reports."""
 
 from __future__ import annotations
 
@@ -266,3 +266,82 @@ def search_products(
         + " ORDER BY products.name"
     )
     return list(connection.execute(statement, parameters).fetchall())
+
+
+def format_cents(cents: int) -> str:
+    """Render whole cents as a decimal string with two places."""
+    sign = "-" if cents < 0 else ""
+    amount = abs(cents)
+    return sign + str(amount // 100) + "." + f"{amount % 100:02d}"
+
+
+def report_stock_value_by_supplier(
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    """Return each supplier's stock value in cents, highest value first."""
+    return list(
+        connection.execute(
+            """
+            SELECT suppliers.name AS supplier_name,
+                   SUM(products.unit_price_cents * products.quantity_on_hand)
+                       AS stock_value_cents
+            FROM suppliers
+            JOIN products ON products.supplier_id = suppliers.id
+            GROUP BY suppliers.id
+            ORDER BY stock_value_cents DESC, suppliers.name
+            """
+        ).fetchall()
+    )
+
+
+def report_low_stock(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return products at or below their reorder level, largest shortfall first."""
+    return list(
+        connection.execute(
+            """
+            SELECT sku, name, quantity_on_hand, reorder_level,
+                   reorder_level - quantity_on_hand AS units_short
+            FROM products
+            WHERE quantity_on_hand <= reorder_level
+            ORDER BY units_short DESC, name
+            """
+        ).fetchall()
+    )
+
+
+def report_sales_by_product(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return units sold and revenue in cents, highest revenue first.
+
+    Revenue uses the price stored on each sale line.
+    """
+    return list(
+        connection.execute(
+            """
+            SELECT products.sku, products.name,
+                   SUM(sale_items.quantity) AS units_sold,
+                   SUM(sale_items.quantity * sale_items.unit_price_cents)
+                       AS revenue_cents
+            FROM products
+            JOIN sale_items ON sale_items.product_id = products.id
+            GROUP BY products.id
+            ORDER BY revenue_cents DESC, products.name
+            """
+        ).fetchall()
+    )
+
+
+def report_never_sold(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return products that appear on no sale, sorted by name."""
+    return list(
+        connection.execute(
+            """
+            SELECT products.sku, products.name
+            FROM products
+            WHERE NOT EXISTS (
+                SELECT 1 FROM sale_items
+                WHERE sale_items.product_id = products.id
+            )
+            ORDER BY products.name
+            """
+        ).fetchall()
+    )
