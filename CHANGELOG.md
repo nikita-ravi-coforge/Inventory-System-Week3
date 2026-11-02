@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0 - 2026-11-02
+
+### Added
+
+- The menu prints how many products are at or below their reorder level when it starts.
+
 ## 1.0.0 - 2026-11-02
 
 ### Added

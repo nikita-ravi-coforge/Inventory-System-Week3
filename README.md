@@ -26,6 +26,8 @@ Run `seed_db.py` once on a new database file. Loading it again fails on the uniq
 
 The menu can search, look up a product, add a product, change a price, delete a product, restock, record a sale, print each report, and back up the database. Prices are entered as whole cents. Text typed where a number is required prints `Please enter a whole number.` and returns to the menu.
 
+Version 1.1.0 prints one line before the menu. With the sample catalog that line is `Low stock: 4 products`. Version 1.0.0 has the same menu and does not print it. The tables are the same in both versions.
+
 ## Configuration
 
 `INVENTORY_DB` is the database file. When it is unset, the file is `inventory.db` next to the code.
@@ -86,7 +88,7 @@ pytest
 ruff check .
 ```
 
-Each test gets a new in-memory database. The current suite is 59 tests.
+Each test gets a new in-memory database. The current suite is 61 tests.
 
 ## Backup and restore
 
@@ -105,50 +107,67 @@ stock_movements: original 0 backup 0
 
 ## Docker
 
-The image is `python:3.12.16-slim`. Dependencies are installed before the application code is copied, so a code change does not reinstall packages.
+The image is `python:3.12.16-slim`. Dependencies are installed before the application code is copied, so a code change does not reinstall packages. `v1.0.0` has no low-stock banner. `v1.1.0` prints one. The tables are the same.
 
 ```bash
+git checkout v1.0.0
 docker build -t inventory:1.0.0 .
+git checkout v1.1.0
+docker build -t inventory:1.1.0 .
+```
+
+Both builds finished. Each ended with `DONE`.
+
+```bash
 docker run --rm -it \
+  -e INVENTORY_DB=/data/inventory.db \
+  -v inventory-data:/data \
+  inventory:1.1.0
+```
+
+One container writes the sample catalog. A second container reads the same volume:
+
+```bash
+docker volume rm -f inventory-data
+docker run --rm \
+  -e INVENTORY_DB=/data/inventory.db \
+  -v inventory-data:/data \
+  inventory:1.1.0 python seed_db.py
+docker run --rm \
+  -e INVENTORY_DB=/data/inventory.db \
+  -v inventory-data:/data \
+  inventory:1.1.0 python -c "from contextlib import closing; from inventory_db import connect, db_path, table_counts
+with closing(connect(db_path())) as connection:
+    for name, count in table_counts(connection).items():
+        print(f'{name}: {count}')"
+```
+
+The second container printed:
+
+```text
+suppliers: 4
+products: 12
+sales: 5
+sale_items: 12
+stock_movements: 0
+```
+
+## Rollback
+
+`v1.1.0` does not change the tables. Open the same volume with `v1.0.0`.
+
+```bash
+printf '0\n' | docker run --rm -i \
+  -e INVENTORY_DB=/data/inventory.db \
+  -v inventory-data:/data \
+  inventory:1.1.0
+printf '0\n' | docker run --rm -i \
   -e INVENTORY_DB=/data/inventory.db \
   -v inventory-data:/data \
   inventory:1.0.0
 ```
 
-Persistence uses the same volume on a second container. The first container loads the sample data. The second container only reads it:
-
-```bash
-docker run --rm \
-  -e INVENTORY_DB=/data/inventory.db \
-  -v inventory-data:/data \
-  inventory:1.0.0 python seed_db.py
-
-docker run --rm \
-  -e INVENTORY_DB=/data/inventory.db \
-  -v inventory-data:/data \
-  inventory:1.0.0 python -c "from contextlib import closing; from inventory_db import connect, db_path, table_counts
-with closing(connect(db_path())) as connection:
-    for name, count in table_counts(connection).items():
-        print(f'{name}: {count}')"
-```
-
-The build log and the persistence transcript are pasted here after those commands are run on a machine with Docker. This machine does not have the `docker` command installed, so those two transcripts are not in this copy yet.
-
-## Rollback
-
-Version 1.1.0 only adds a low-stock count when the menu starts. It does not change the tables. Point the 1.0.0 image at the same volume:
-
-```bash
-docker run --rm \
-  -e INVENTORY_DB=/data/inventory.db \
-  -v inventory-data:/data \
-  inventory:1.0.0 python -c "from contextlib import closing; from inventory_db import connect, db_path, table_counts
-with closing(connect(db_path())) as connection:
-    for name, count in table_counts(connection).items():
-        print(f'{name}: {count}')"
-```
-
-The row counts stay the same. The captured rollback transcript is added when `inventory:1.1.0` is tagged.
+`v1.1.0` started with `Low stock: 4 products`, then the menu, then `Goodbye.` `v1.0.0` printed the menu with no banner, then `Goodbye.` The row counts were still 4, 12, 5, 12, and 0.
 
 ## Self-review
 

@@ -15,6 +15,18 @@ def _run(connection, answers):
     return lines
 
 
+def test_menu_shows_low_stock_banner_for_the_sample_catalog(connection):
+    with connection:
+        load_sample_data(connection)
+    lines = _run(connection, ["0"])
+    assert lines[0] == "Low stock: 4 products"
+
+
+def test_menu_shows_zero_when_nothing_is_low(connection):
+    lines = _run(connection, ["0"])
+    assert lines[0] == "Low stock: 0 products"
+
+
 def test_menu_rejects_text_where_a_number_is_expected(connection):
     lines = _run(connection, ["2", "abc", "0"])
     assert "Please enter a whole number." in lines
