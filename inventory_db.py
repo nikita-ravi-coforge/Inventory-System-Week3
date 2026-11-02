@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -512,3 +513,9 @@ def record_sale(
                 )
             _insert_movement(connection, product_id, -quantity, "sale", happened_at)
         return sale_id
+
+
+def backup_database(connection: sqlite3.Connection, destination: str | Path) -> None:
+    """Copy the open database with SQLite's backup API."""
+    with closing(sqlite3.connect(destination)) as target:
+        connection.backup(target)
