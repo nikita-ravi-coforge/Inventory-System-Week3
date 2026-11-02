@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
@@ -131,6 +132,22 @@ def table_counts(connection: sqlite3.Connection) -> dict[str, int]:
 
 class ProductHasSalesError(Exception):
     """Raised when a product that appears on a sale is deleted."""
+
+
+class InvalidAmountError(Exception):
+    """Raised when a quantity is zero, negative, or missing."""
+
+
+class NotEnoughStockError(Exception):
+    """Raised when a change would make stock negative."""
+
+
+class UnknownProductError(Exception):
+    """Raised when a product id does not exist."""
+
+
+class DuplicateSaleLineError(Exception):
+    """Raised when one sale lists the same product twice."""
 
 
 PRODUCT_WITH_SUPPLIER = (
@@ -345,3 +362,153 @@ def report_never_sold(connection: sqlite3.Connection) -> list[sqlite3.Row]:
             """
         ).fetchall()
     )
+
+
+def _timestamp(when: str | None) -> str:
+    """Use the caller's time, or the current UTC time when it was omitted."""
+    if when is None:
+        # timezone.utc works on Python 3.9. datetime.UTC needs 3.11.
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")  # noqa: UP017
+    return when
+
+
+def _insert_movement(
+    connection: sqlite3.Connection,
+    product_id: int,
+    quantity_change: int,
+    reason: str,
+    happened_at: str,
+) -> None:
+    """Log one stock change. Does not commit."""
+    connection.execute(
+        """
+        INSERT INTO stock_movements (
+            product_id, quantity_change, reason, happened_at
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (product_id, quantity_change, reason, happened_at),
+    )
+
+
+def restock(
+    connection: sqlite3.Connection,
+    product_id: int,
+    amount: int,
+    when: str | None = None,
+) -> None:
+    """Add stock and log one restock movement. Both writes commit together."""
+    if amount <= 0:
+        raise InvalidAmountError("Restock amount must be positive.")
+    happened_at = _timestamp(when)
+    with connection:
+        cursor = connection.execute(
+            """
+            UPDATE products
+            SET quantity_on_hand = quantity_on_hand + ?
+            WHERE id = ?
+            """,
+            (amount, product_id),
+        )
+        if cursor.rowcount == 0:
+            raise UnknownProductError(f"Unknown product {product_id}.")
+        _insert_movement(connection, product_id, amount, "restock", happened_at)
+
+
+def adjust_stock(
+    connection: sqlite3.Connection,
+    product_id: int,
+    amount: int,
+    when: str | None = None,
+) -> None:
+    """Apply a signed stock change and log one adjustment movement.
+
+    An amount of zero is refused. A change that would make stock negative
+    raises NotEnoughStockError and leaves the database unchanged.
+    """
+    if amount == 0:
+        raise InvalidAmountError("An adjustment cannot be zero.")
+    happened_at = _timestamp(when)
+    with connection:
+        cursor = connection.execute(
+            """
+            UPDATE products
+            SET quantity_on_hand = quantity_on_hand + ?
+            WHERE id = ? AND quantity_on_hand + ? >= 0
+            """,
+            (amount, product_id, amount),
+        )
+        if cursor.rowcount == 0:
+            row = connection.execute(
+                "SELECT id FROM products WHERE id = ?",
+                (product_id,),
+            ).fetchone()
+            if row is None:
+                raise UnknownProductError(f"Unknown product {product_id}.")
+            raise NotEnoughStockError("That adjustment would make stock negative.")
+        _insert_movement(connection, product_id, amount, "adjustment", happened_at)
+
+
+def record_sale(
+    connection: sqlite3.Connection,
+    lines: list[tuple[int, int]],
+    when: str | None = None,
+) -> int:
+    """Record a sale, its lines, the stock reductions, and one movement per line.
+
+    lines is a list of (product_id, quantity) pairs. Each line stores the
+    product's current price. Any failure rolls the whole sale back.
+    """
+    if not lines:
+        raise InvalidAmountError("A sale needs at least one line.")
+    happened_at = _timestamp(when)
+    with connection:
+        cursor = connection.execute(
+            "INSERT INTO sales (sold_at) VALUES (?)",
+            (happened_at,),
+        )
+        sale_id = cursor.lastrowid
+        seen: set[int] = set()
+        for product_id, quantity in lines:
+            if quantity <= 0:
+                raise InvalidAmountError("Sale quantity must be positive.")
+            if product_id in seen:
+                raise DuplicateSaleLineError(
+                    "The same product cannot appear twice in one sale."
+                )
+            seen.add(product_id)
+            row = connection.execute(
+                """
+                SELECT unit_price_cents, quantity_on_hand
+                FROM products
+                WHERE id = ?
+                """,
+                (product_id,),
+            ).fetchone()
+            if row is None:
+                raise UnknownProductError(f"Unknown product {product_id}.")
+            if row["quantity_on_hand"] < quantity:
+                raise NotEnoughStockError(
+                    f"Not enough stock for product {product_id}."
+                )
+            connection.execute(
+                """
+                INSERT INTO sale_items (
+                    sale_id, product_id, quantity, unit_price_cents
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (sale_id, product_id, quantity, row["unit_price_cents"]),
+            )
+            updated = connection.execute(
+                """
+                UPDATE products
+                SET quantity_on_hand = quantity_on_hand - ?
+                WHERE id = ? AND quantity_on_hand >= ?
+                """,
+                (quantity, product_id, quantity),
+            )
+            if updated.rowcount == 0:
+                raise NotEnoughStockError(
+                    f"Not enough stock for product {product_id}."
+                )
+            _insert_movement(connection, product_id, -quantity, "sale", happened_at)
+        return sale_id
