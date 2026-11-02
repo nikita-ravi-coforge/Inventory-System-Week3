@@ -268,7 +268,9 @@ ACTIONS = {
 
 
 def run_menu(connection, input_func=input, output_func=print) -> None:
-    """Show the menu until the user quits. Bad input prints a message."""
+    """Show the low-stock banner, then the menu, until the user quits."""
+    low_stock = len(report_low_stock(connection))
+    output_func(f"Low stock: {low_stock} products")
     while True:
         output_func(MENU)
         try:
